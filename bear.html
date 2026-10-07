@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>库页湖 · 棕熊</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #1a1a1a;
+    overflow: hidden;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  canvas { display: block; position: fixed; top: 0; left: 0; image-rendering: pixelated; }
+
+  /* ===== 竖屏底部 UI：三个按钮（PC 横屏时整块隐藏）===== */
+  #ui { display: none; }
+  body.portrait #ui {
+    display: flex;
+    position: fixed; left: 0; right: 0; bottom: 0;
+    height: 15%;
+    box-sizing: border-box;
+    padding: 0 3vw 2.5vw;
+    gap: 3vw;
+    background: #16202a;
+    align-items: flex-end;
+    z-index: 10;
+    /* 条子本身不吃点击：点按钮以外的任何地方都要能触发捕鱼 */
+    pointer-events: none;
+  }
+  .ui-btn {
+    flex: 1 1 0;
+    height: 62%;
+    min-height: 30px;
+    pointer-events: auto;              /* 只有这三个按钮吃点击 */
+    font: 600 4.2vw/1.2 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #eaf3f8;
+    background: #2c4152;
+    border: 2px solid #4d6b80;
+    border-radius: 6px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .ui-btn:active { background: #3b5568; }
+
+  /* ===== 弹窗 ===== */
+  #modal {
+    display: none;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(8, 16, 22, 0.62);
+    z-index: 20;
+    align-items: center;
+    justify-content: center;
+  }
+  #modal.open { display: flex; }
+  .modal-box {
+    width: 84%;
+    max-height: 72%;
+    box-sizing: border-box;
+    padding: 5vw 5vw 4vw;
+    background: #eef4f7;
+    color: #1d2b35;
+    border: 3px solid #4d6b80;
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    font: 3.9vw/1.75 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .modal-box h2 { margin: 0 0 3vw; font-size: 5vw; }
+  #modal-text {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: pre-line;
+  }
+  #modal-close {
+    flex: 0 0 auto;
+    margin-top: 4vw;
+    padding: 2.5vw 0;
+    font: 600 4.2vw/1 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #eaf3f8;
+    background: #2c4152;
+    border: 2px solid #4d6b80;
+    border-radius: 6px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<!-- 竖屏底部的 UI 区（横屏时整块隐藏） -->
+<div id="ui">
+  <button class="ui-btn" data-info="season">鲑鱼季</button>
+  <button class="ui-btn" data-info="lake">库页湖</button>
+  <button class="ui-btn" data-info="kamchatka">堪察加</button>
+</div>
+
+<!-- 弹窗：纯文字介绍 -->
+<div id="modal">
+  <div class="modal-box">
+    <h2 id="modal-title"></h2>
+    <div id="modal-text"></div>
+    <button id="modal-close">关闭</button>
+  </div>
+</div>
+<script>
+// ===== 基准坐标系：800×400 的逻辑坐标，所有游戏状态都用它 =====
+const BASE_W = 800;
+const RIVER_TOP = 200;      // 基准坐标里的河面上沿
+const RIVER_BOTTOM = 380;   // 基准坐标里的河面下沿
+const RIVER_MID = (RIVER_TOP + RIVER_BOTTOM) / 2;
+const BEAR_HOME_X = 120;    // 熊初始位置 x（只在开局用一次）
+const BEAR_HOME_Y = 250;    // 熊初始位置 y（只在开局用一次）
+
+// ===== 画布 =====
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ===== 背景贴图：天空 + 雪山 + 针叶林 =====
+const BG_IMG_W = 1500, BG_IMG_H = 408;             // 素材原始尺寸（图加载完会用真实值）
+const bgImg = new Image();
+bgImg.onload = () => resize();                     // 拿到真实比例后重算一次布局
+bgImg.onerror = () => console.error('背景图加载失败：img/bj.png');
+bgImg.src = 'img/bj.png';
+
+// ===== 河流贴图 =====
+const heImg = new Image();
+heImg.onerror = () => console.error('河流图加载失败：img/he.png');
+heImg.src = 'img/he.png';
+
+// ===== 屏幕布局：一次适配所有尺寸 =====
+let W = 0, H = 0;                                  // 屏幕实际宽高（CSS 像素）
+let S = 1;                                         // 坐标缩放（位置用）
+let SZ = 1;                                        // 鱼和熊的贴图缩放（大小用，按河流高度算）
+let bgH = 0;                                       // 背景贴图高度，也就是河面上沿
+let bgSrcX = 0, bgSrcY = 0, bgSrcH = BG_IMG_H, bgSrcW = BG_IMG_W;   // 从源图取的区域
+let waterMid = 0;                                  // 河道的垂直中心
+let waterBottom = 0;                               // 河道在屏幕上的下沿（竖屏时上方是 UI 区）
+let worldW = BASE_W;                               // 虚拟世界宽度（基准坐标下的横向活动范围）
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W;
+  canvas.height = H;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+
+  const portrait = H > W;
+  document.body.classList.toggle('portrait', portrait);   // 底部 25% 的 UI 只在竖屏出现
+
+  // 1) 背景图
+  const iw = bgImg.naturalWidth > 0 ? bgImg.naturalWidth : BG_IMG_W;
+  const ih = bgImg.naturalHeight > 0 ? bgImg.naturalHeight : BG_IMG_H;
+
+  bgSrcX = 0; bgSrcY = 0; bgSrcW = iw; bgSrcH = ih;
+
+  if (portrait) {
+    // ===== 手机竖屏：顶部 35% 雪山 / 中间 50% 游戏区 / 底部 15% UI =====
+    bgH = H * 0.35;
+    // 图的纵向完整显示：雪山在上、针叶林在下，底边正好压在游戏区上沿。
+    // 图比屏幕宽，所以只裁左右（居中裁），不裁上下。
+    bgSrcH = ih;
+    bgSrcW = ih * (W / bgH);
+    if (bgSrcW > iw) { bgSrcW = iw; bgSrcH = iw * (bgH / W); }
+    bgSrcX = (iw - bgSrcW) / 2;
+    bgSrcY = 0;
+
+    waterBottom = H * 0.85;
+  } else {
+    // ===== 电脑横屏：原样不动 =====
+    const naturalH = W * ih / iw;
+    bgH = Math.min(naturalH, H * 0.7);             // 只在极端宽扁屏上兜底裁一点天空
+    if (bgH < naturalH) {
+      bgSrcH = iw * bgH / W;
+      bgSrcY = ih - bgSrcH;                        // 保留下方的针叶林
+    }
+    waterBottom = H;
+  }
+
+  // 2) 坐标缩放：按屏幕宽度等比，同时保证基准河段放得进游戏区
+  const waterH = waterBottom - bgH;
+  S = Math.min(W / BASE_W, waterH / (RIVER_BOTTOM - RIVER_TOP));
+
+  // 3) 鱼和熊的贴图大小：按游戏区高度算（基准河高 180），跟画布宽度无关。
+  //    上限用屏幕宽度兜底；竖屏游戏区占 50%，上限放宽让贴图尽量大。
+  SZ = Math.min(waterH / (RIVER_BOTTOM - RIVER_TOP) * 1.4,
+                W * (portrait ? 0.60 : 0.18) / 60);
+
+  // 4) 虚拟世界宽度：S 被河高压小的时候，鱼依然横跨整屏
+  worldW = Math.max(BASE_W, W / S);
+
+  waterMid = bgH + waterH / 2;                     // 游戏区的垂直中心
+}
+window.addEventListener('resize', resize);
+
+// 基准坐标 → 屏幕坐标（所有绘制都经过这两个函数）
+function sx(x) { return x * S; }
+function sy(y) { return waterMid + (y - RIVER_MID) * S; }
+
+resize();
+
+// 石头装饰（都在水里，画在鱼下面）
+const stones = [
+  { x: 170, y: RIVER_TOP + 10, w: 26, h: 12 },
+  { x: 640, y: RIVER_TOP + 16, w: 20, h: 9 },
+  { x: 80,  y: RIVER_BOTTOM - 10, w: 18, h: 9 },
+  { x: 710, y: RIVER_BOTTOM - 12, w: 24, h: 11 },
+  { x: 240, y: RIVER_BOTTOM - 8,  w: 14, h: 7 }
+];
+
+// ===== 熊 =====
+// BEAR_HOME_X / BEAR_HOME_Y 只用来定游戏开始时熊站在哪，之后不再使用
+const bear = {
+  x: BEAR_HOME_X,
+  y: BEAR_HOME_Y,
+  w: 60,
+  h: 50,
+  state: 'idle',      // idle | pouncing | chewing
+  timer: 0,
+  fromX: BEAR_HOME_X, // 本次扑击的起点（当前位置）
+  fromY: BEAR_HOME_Y,
+  targetX: 0,
+  targetY: 0,
+  hasFish: false
+};
+
+// 熊的贴图（异步加载，draw() 里等它就绪才画）
+const bearImg = new Image();
+bearImg.onerror = () => { console.error('熊的图片加载失败：img/bear.png'); };
+bearImg.src = 'img/bear.png';
+
+// ===== 鱼的贴图（异步加载；没就绪时先画色块占位，加载完自动换图）=====
+const fishImg1 = new Image(); fishImg1.src = 'img/f1.png';   // 红鲑
+const fishImg2 = new Image(); fishImg2.src = 'img/f2.png';   // 银鲑
+const fishImg3 = new Image(); fishImg3.src = 'img/f3.png';   // 王鲑
+const FISH_IMGS = { 1: fishImg1, 2: fishImg2, 3: fishImg3 };
+// 加载失败在控制台报一声（此时那种鱼会一直显示占位色块），方便排查路径
+for (const t in FISH_IMGS) {
+  FISH_IMGS[t].onerror = () => console.error('贴图加载失败：img/f' + t + '.png');
+}
+
+// ===== 鱼的品种 =====
+// type 对应贴图；color / tail 只在贴图没加载完时当占位色块用
+// 体型 / 分值 / 出现概率（概率之和 = 1）
+const SPECIES = [
+  { type: 1, name: '红鲑', color: '#e07b39', tail: '#c96a2e', w: 18, h: 8,  points: 10, chance: 0.60 },
+  { type: 2, name: '银鲑', color: '#b8c4cc', tail: '#8f9aa3', w: 22, h: 10, points: 20, chance: 0.30 },
+  { type: 3, name: '王鲑', color: '#8a2a4a', tail: '#6b1f39', w: 26, h: 12, points: 50, chance: 0.10 }
+];
+
+// 按概率抽一个品种
+function randomSpecies() {
+  let r = Math.random();
+  for (const sp of SPECIES) {
+    if (r < sp.chance) return sp;
+    r -= sp.chance;
+  }
+  return SPECIES[SPECIES.length - 1];
+}
+
+// ===== 分数 =====
+const BEST_KEY = 'bear_salmon_best';
+let score = 0;
+let bestScore = 0;
+try { bestScore = Number(localStorage.getItem(BEST_KEY)) || 0; } catch (e) { bestScore = 0; }
+
+function saveBest(v) {
+  try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) { /* 存不了就算了，不影响游戏 */ }
+}
+
+// ===== 鲑鱼 =====
+const FISH_COUNT = 6;
+const fishes = [];
+
+// 鱼的状态时长（单位≈帧，60fps 下 60 帧 ≈ 1 秒）
+const VISIBLE_TIME = [120, 420];   // 浮在水里游动 2~7 秒后随机潜水
+const HIDDEN_TIME  = [60, 120];    // 潜水 1~2 秒后自动浮上来
+
+function randRange(range) {
+  return range[0] + Math.random() * (range[1] - range[0]);
+}
+
+function spawnFish() {
+  const sp = randomSpecies();
+  return {
+    x: Math.random() * (worldW - 100) + 50,
+    y: Math.random() * (RIVER_BOTTOM - RIVER_TOP - 40) + RIVER_TOP + 20,
+    vx: (Math.random() > 0.5 ? 1 : -1) * (0.5 + Math.random() * 0.8),
+    species: sp,                       // 品种：决定体型、颜色、分值
+    type: sp.type,                     // 品种编号 1 红鲑 / 2 银鲑 / 3 王鲑
+    w: sp.w,
+    h: sp.h,
+    alive: true,
+    state: 'visible',                  // visible 可见可抓 | hidden 潜水不可见不可抓
+    // 初始计时随机错开，避免所有鱼同时潜水
+    stateTimer: randRange(VISIBLE_TIME),
+    rippleTimer: 0
+  };
+}
+
+for (let i = 0; i < FISH_COUNT; i++) fishes.push(spawnFish());
+
+// ===== 水花 =====
+let splash = { active: false, x: 0, y: 0, timer: 0 };
+
+// ===== 点击判定 =====
+let clickLock = false;   // 熊忙的时候不接受新点击
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (clickLock) return;
+
+  // 点哪都能捕鱼：底部 UI 条设了 pointer-events:none，只有三个按钮自己吃点击，
+  // 点按钮走的是 click 事件，不会传到这里
+  // 只有当前 visible 的鱼参与判定；没有可见的鱼就什么都不发生
+  const alive = fishes.filter(f => f.alive && f.state === 'visible');
+  if (alive.length === 0) return;
+
+  const target = alive[Math.floor(Math.random() * alive.length)];
+
+  // 命中概率
+  const hitChance = 0.65;
+  const willHit = Math.random() < hitChance;
+
+  // 从熊当前所在位置出发
+  bear.fromX = bear.x;
+  bear.fromY = bear.y;
+  bear.state = 'pouncing';
+  bear.timer = 0;
+  bear.targetX = target.x;
+  bear.targetY = target.y;
+  bear.hasFish = false;
+  clickLock = true;
+
+  // 把结果挂在熊身上，扑到之后再处理
+  bear.pendingHit = willHit;
+  bear.pendingFish = target;
+});
+
+// ===== 更新 =====
+function update(dt) {
+  // 鱼游动 + 潜水/浮出
+  for (const f of fishes) {
+    if (!f.alive) continue;
+    f.x += f.vx * dt;
+    if (f.x < 20 || f.x > worldW - 20) {
+      f.vx *= -1;
+      f.x = Math.max(20, Math.min(worldW - 20, f.x));
+    }
+
+    // 状态计时，到点就切换；每条鱼各自计时，所以不会同时潜水
+    f.stateTimer -= dt;
+    if (f.stateTimer <= 0) {
+      if (f.state === 'visible') {
+        f.state = 'hidden';                       // 游着游着潜下去
+        f.stateTimer = randRange(HIDDEN_TIME);
+        f.rippleTimer = 0;
+      } else {
+        f.state = 'visible';                      // 潜够了自动浮上来
+        f.stateTimer = randRange(VISIBLE_TIME);
+      }
+    }
+    if (f.state === 'hidden') f.rippleTimer += dt;
+  }
+
+  // 熊状态机
+  if (bear.state === 'pouncing') {
+    bear.timer += dt;
+    const t = Math.min(bear.timer / 12, 1);   // 12 帧扑过去
+    // 从当前位置扑向目标，不再从原位出发
+    bear.x = bear.fromX + (bear.targetX - bear.fromX) * t;
+    bear.y = bear.fromY + (bear.targetY - bear.fromY) * t;
+
+    if (t >= 1) {
+      // 到达目标，判定结果
+      if (bear.pendingHit && bear.pendingFish.alive) {
+        const caught = bear.pendingFish;
+        caught.alive = false;
+        bear.hasFish = true;
+        bear.mouthSpecies = caught.species;      // 嘴里叼的是刚抓到的那个品种
+        // 按品种加分；咬空时不加分也不扣分
+        score += caught.species.points;
+        if (score > bestScore) {
+          bestScore = score;
+          saveBest(bestScore);
+        }
+        bear.state = 'chewing';
+        bear.timer = 0;
+      } else {
+        // 咬空，水花；熊留在原地
+        splash.active = true;
+        splash.x = bear.x;
+        splash.y = bear.y;
+        splash.timer = 0;
+        bear.state = 'idle';
+        bear.timer = 0;
+        clickLock = false;
+      }
+    }
+  } else if (bear.state === 'chewing') {
+    bear.timer += dt;
+    if (bear.timer > 60) {   // 叼着鱼约 1 秒
+      bear.hasFish = false;
+      bear.state = 'idle';   // 吃完就停在原地，不返回原位
+      bear.timer = 0;
+      clickLock = false;
+    }
+  }
+
+  // 水花
+  if (splash.active) {
+    splash.timer += dt;
+    if (splash.timer > 20) splash.active = false;
+  }
+
+  // 鱼太少时补充
+  if (fishes.filter(f => f.alive).length < 3) {
+    fishes.push(spawnFish());
+  }
+}
+
+// ===== 像素风位图字体=====
+const PIXEL_FONT = {
+  '0': ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+  '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+  '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
+  '3': ['#####', '...#.', '..#..', '...#.', '....#', '#...#', '.###.'],
+  '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '...#.', '...#.'],
+  '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
+  '6': ['..##.', '.#...', '#....', '####.', '#...#', '#...#', '.###.'],
+  '7': ['#####', '....#', '...#.', '..#..', '.#...', '.#...', '.#...'],
+  '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
+  '9': ['.###.', '#...#', '#...#', '.####', '....#', '...#.', '.##..'],
+  'S': ['.####', '#....', '#....', '.###.', '....#', '....#', '####.'],
+  'C': ['.###.', '#...#', '#....', '#....', '#....', '#...#', '.###.'],
+  'O': ['.###.', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+  'R': ['####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'],
+  'E': ['#####', '#....', '#....', '####.', '#....', '#....', '#####'],
+  'H': ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+  'I': ['.###.', '..#..', '..#..', '..#..', '..#..', '..#..', '.###.']
+};
+
+// 一个字宽 5 格、字距 1 格
+function pixelTextWidth(text, scale) {
+  return text.length * 6 * scale - scale;
+}
+
+function drawPixelText(text, x, y, scale, color) {
+  ctx.fillStyle = color;
+  let cx = x;
+  for (const ch of String(text).toUpperCase()) {
+    const g = PIXEL_FONT[ch];
+    if (g) {
+      for (let r = 0; r < g.length; r++) {
+        for (let c = 0; c < 5; c++) {
+          if (g[r][c] === '#') ctx.fillRect(cx + c * scale, y + r * scale, scale, scale);
+        }
+      }
+    }
+    cx += 6 * scale;
+  }
+}
+
+// 右上角：当前分数 + 最高分（贴在屏幕右上角，字也按 S 放大）
+function drawHUD() {
+  const fs = Math.max(2, Math.round(2 * S));   // 像素字放大倍数
+  const pad = 6 * fs;                          // 距屏幕右/上边
+  const lines = ['SCORE ' + score, 'HI ' + bestScore];
+
+  for (let i = 0; i < lines.length; i++) {
+    const x = W - pad - pixelTextWidth(lines[i], fs);
+    const y = pad + i * (7 * fs + 6);
+    // 先画一格浅色投影，深色字压在亮天空/雪山上都清楚
+    drawPixelText(lines[i], x + fs, y + fs, fs, 'rgba(255,255,255,0.7)');
+    drawPixelText(lines[i], x, y, fs, '#2b3a45');
+  }
+}
+
+// 画一条鱼的贴图：平移到鱼的位置，往左游就水平翻转。
+// 贴图还没加载完（或加载失败）时先画品种色块占位，加载完自动换成图片。
+function drawFishSprite(sp, cx, cy, w, h, flip, alpha) {
+  const img = FISH_IMGS[sp.type];
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(cx, cy);
+  if (flip) ctx.scale(-1, 1);
+
+  if (img && img.complete && img.naturalWidth > 0) {
+    ctx.drawImage(img, -w / 2, -h / 2, w, h);
+  } else {
+    // 占位色块
+    ctx.fillStyle = sp.color;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+    ctx.fillStyle = sp.tail;
+    ctx.fillRect(-w / 2 - 4, -h * 0.35, 4, h * 0.7);
+  }
+
+  ctx.restore();
+}
+
+// ===== 绘制 =====
+function draw() {
+  // 先铺一层天空色打底：背景图没加载完、或素材的天空是透明的，都不会露出页面黑底
+  ctx.fillStyle = '#cfe6f5';
+  ctx.fillRect(0, 0, W, bgH);
+
+  // 背景贴图：天空 + 雪山 + 针叶林，横向铺满整屏
+  if (bgImg.complete && bgImg.naturalWidth > 0) {
+    ctx.drawImage(bgImg, bgSrcX, bgSrcY, bgSrcW, bgSrcH, 0, 0, W, bgH);
+  }
+
+  // 河流：贴图铺满游戏区（横屏是 bgH~屏幕底，竖屏是中间 45% 那一段）
+  // 图没加载完就先用纯蓝占位，加载完自动替换，游戏不会因为缺图卡住
+  const waterH = waterBottom - bgH;
+  if (heImg.complete && heImg.naturalWidth > 0) {
+    ctx.drawImage(heImg, 0, bgH, W, waterH);
+  } else {
+    ctx.fillStyle = '#5aa8d4';
+    ctx.fillRect(0, bgH, W, waterH);
+  }
+
+  // 竖屏：底部 25% 是 UI 区，先铺个底色，免得 canvas 露空
+  if (waterBottom < H) {
+    ctx.fillStyle = '#16202a';
+    ctx.fillRect(0, waterBottom, W, H - waterBottom);
+  }
+
+  // 石头装饰（画在鱼下面；按世界宽度等比例铺开，宽屏上不会全挤在左边）
+  const stoneGap = worldW / BASE_W;
+  for (const s of stones) {
+    const bx = s.x * stoneGap, by = s.y;
+    ctx.fillStyle = '#7a7a72';
+    ctx.fillRect(sx(bx), sy(by), s.w * S, s.h * S);
+    ctx.fillStyle = '#94948a';
+    ctx.fillRect(sx(bx + 2), sy(by), (s.w - 6) * S, 4 * S);
+    ctx.fillStyle = '#5c5c55';
+    ctx.fillRect(sx(bx), sy(by + s.h - 3), s.w * S, 3 * S);
+  }
+
+  // 鱼：visible 正常画；hidden 缩小 + 半透明，并在水面留一圈涟漪
+  // 上下浮动只加在绘制位置上（bobY），不动 f.y，所以不影响鱼的真实坐标和点击判定
+  const bobY = Math.sin(Date.now() / 200) * 2;
+
+  for (const f of fishes) {
+    if (!f.alive) continue;
+    const flip = f.vx < 0;                     // 往左游 → 水平翻转
+    const fx = sx(f.x), fy = sy(f.y + bobY);
+
+    if (f.state === 'visible') {
+      drawFishSprite(f.species, fx, fy, f.w * SZ, f.h * SZ, flip, 1);
+    } else {
+      // 潜水：缩小到 6 成 + 半透明
+      const k = 0.6;
+      drawFishSprite(f.species, fx, fy, f.w * k * SZ, f.h * k * SZ, flip, 0.3);
+
+      // 水面涟漪，提示下面有鱼
+      const pulse = (f.rippleTimer % 24) / 24;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.5 * (1 - pulse)).toFixed(3) + ')';
+      ctx.lineWidth = Math.max(1, S);
+      ctx.beginPath();
+      ctx.arc(fx, sy(RIVER_TOP + 10), (3 + pulse * 9) * S, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  // 熊（贴图大小走 SZ，位置仍走 sx/sy）
+  if (bearImg.complete && bearImg.naturalWidth > 0) {
+    const bw = bear.w * SZ, bh = bear.h * SZ;
+    ctx.drawImage(bearImg, sx(bear.x) - bw / 2, sy(bear.y) - bh / 2, bw, bh);
+  }
+
+  // 嘴里的鱼（品种跟着刚抓到的鱼走；熊头朝右，所以鱼头朝里、尾巴朝外 → 翻转画）
+  if (bear.hasFish) {
+    const sp = bear.mouthSpecies || SPECIES[0];
+    const bw = bear.w * SZ, bh = bear.h * SZ;        // 熊在屏幕上的大小
+    const mw = sp.w * SZ, mh = sp.h * 0.75 * SZ;     // 嘴里的鱼跟鱼一样大
+    const wiggle = Math.sin(Date.now() / 80) * 2 * SZ;
+    // 嘴边在熊贴图里的位置：横向 80%（鱼头从这儿往右伸出去）、纵向 66%
+    const bx = sx(bear.x) - bw / 2, by = sy(bear.y) - bh / 2;
+    drawFishSprite(sp, bx + bw * 0.80 + mw / 2, by + bh * 0.66 + wiggle,
+                   mw, mh, true, 1);
+  }
+
+  // 水花
+  if (splash.active) {
+    ctx.fillStyle = 'rgba(255,255,255,' + (1 - splash.timer / 20) + ')';
+    const size = 4 * S;
+    for (let i = 0; i < 8; i++) {
+      const angle = (Math.PI * 2 / 8) * i;
+      const dist = splash.timer * 2 * S;
+      ctx.fillRect(
+        sx(splash.x) + Math.cos(angle) * dist - size / 2,
+        sy(splash.y) + Math.sin(angle) * dist - size / 2,
+        size, size
+      );
+    }
+  }
+
+  // 右上角分数（画在最上层）
+  drawHUD();
+}
+
+// ===== 竖屏底部 UI：三个按钮 + 弹窗（内容先用占位文字）=====
+const INFO = {
+ season: {
+  title: '鲑鱼季',
+  text: '每年夏末到深秋，成千上万条鲑鱼会从海里逆流而上，' +
+        '回到它们出生的淡水河川产卵。\n\n' +
+        '这是堪察加一年里最热闹的时节，也是棕熊们抓紧囤脂肪、' +
+        '为冬眠做准备的关键时期。\n\n' +
+        '一条成年棕熊每天能吃掉几十条鲑鱼，' +
+        '只挑最肥美的部分下口，剩下的留给其他动物。\n\n' +
+        '鲑鱼季结束后，河面重归平静，' +
+        '棕熊也钻进洞穴，开始长达半年的冬眠。'
+          
+  },
+ lake: {
+  title: '库页湖',
+  text: '库页湖在堪察加半岛南部，是一个被雪山环抱的火山口湖，' +
+        '湖水清澈，湖面常年倒映着雪峰。\n\n' +
+        '每年鲑鱼季，数以百万计的鲑鱼会游进湖里产卵，' +
+        '数量多到能把浅水区染成一片红色。\n\n' +
+        '正是这些鲑鱼，把库页湖变成了棕熊的食堂。' +
+        '湖边常常同时聚集着几十头棕熊，' +
+        '各自占据一段河道，互不打扰。\n\n' +
+        '这里也是全球研究棕熊和鲑鱼关系最重要的地点之一。'
+},
+          
+  
+ kamchatka: {
+  title: '堪察加',
+  text: '堪察加半岛位于俄罗斯远东，面积约 37 万平方公里，' +
+        '火山、间歇泉和冰川遍布全境。\n\n' +
+        '这里人烟稀少、开发有限，' +
+        '是全世界棕熊密度最高的地区之一，' +
+        '估计生活着超过一万头棕熊。\n\n' +
+        '除了棕熊，这里还有虎头海雕' +
+        '北极狐、驯鹿等野生动物，' +
+        '是地球上最原始的荒野之一。\n\n' +
+        '对很多人来说，堪察加就是“熊的国度”。'
+},
+          };
+
+const modalEl = document.getElementById('modal');
+const modalTitle = document.getElementById('modal-title');
+const modalText = document.getElementById('modal-text');
+
+function openInfo(key) {
+  const info = INFO[key];
+  if (!info) return;
+  modalTitle.textContent = info.title;
+  modalText.textContent = info.text;
+  modalText.scrollTop = 0;               // 每次打开都从头看
+  modalEl.classList.add('open');
+}
+
+function closeInfo() {
+  modalEl.classList.remove('open');
+}
+
+for (const btn of document.querySelectorAll('.ui-btn')) {
+  btn.addEventListener('click', () => openInfo(btn.dataset.info));
+}
+document.getElementById('modal-close').addEventListener('click', closeInfo);
+// 点弹窗外面（也就是遮罩本身）收回
+modalEl.addEventListener('click', (e) => { if (e.target === modalEl) closeInfo(); });
+
+// ===== 主循环 =====
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 16.67, 2);  // 归一化到 ~60fps
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
