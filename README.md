@@ -4,7 +4,7 @@
 你偶尔点一下，它偶尔抓到，偶尔抓不到。
 
 没有分数压力，没有倒计时，没有失败。打开就有事做，关掉就不想它。
-limk:https://tromk0.github.io/bear/
+link:https://tromk0.github.io/bear/
 ## 玩法
 
 - 点击屏幕任意位置（UI 按钮除外），棕熊会扑向河里浮着的鱼
